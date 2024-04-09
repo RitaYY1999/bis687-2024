@@ -1,0 +1,225 @@
+---
+title: "mid-progress"
+output: html_document
+date: "2024-04-05"
+---
+
+# Load the Dataset
+
+```{r}
+library(readxl) 
+#setwd("/Users/gladyswang/Desktop/Spring_2024/DS_Capstone")
+sickle_cell <- read.csv("/Users/ritay/Desktop/Capstone/bis687-2024/bis687-2024/curesc_year3_v3.csv")
+```
+
+# Data Preprocessing
+```{r}
+# filter out variables with same value
+print_columns_same_value <- function(df) {
+  same_value_columns <- sapply(df, function(col) length(unique(col)) == 1)
+  names(df)[same_value_columns]
+}
+variables_with_same_value <- print_columns_same_value(sickle_cell)
+sickle_cell <- sickle_cell[, !names(sickle_cell) %in% variables_with_same_value]
+```
+
+
+```{r}
+# extract pre-HCT variables
+codebook <- read_excel("/Users/ritay/Desktop/Capstone/bis687-2024/bis687-2024/Codebook 2021 Year 3.xlsx")
+codebook_prehct <- codebook[codebook['HCT status'] == "pre-HCT",]
+completeRows <- complete.cases(codebook_prehct["HCT status"])
+codebook_prehct <- codebook_prehct[completeRows, ]
+codebook_prehct[codebook_prehct$`Variable name` == "racegp", 'Variable name'] <- 'raceg'
+names(sickle_cell) <- tolower(names(sickle_cell))
+common_columns <- intersect(names(sickle_cell), codebook_prehct$`Variable name`)
+sickle_cell_prehct <- sickle_cell[, common_columns]
+names(sickle_cell_prehct) <- toupper(names(sickle_cell_prehct))
+sickle_cell_prehct$ACSPSHI <- sickle_cell$acspshi
+```
+
+```{r}
+# remove duplicate variables
+duplicate_variables <- c("AGE", "YEARTX", "SCREUNIT", "SCRENUNT", "SALBUNIT", "SALBNUNT", "HB1UNPR")
+sickle_cell_prehct <- sickle_cell_prehct[, !names(sickle_cell_prehct) %in% duplicate_variables]
+```
+
+```{r}
+# remove variables with >= 60% missing values
+missing_percentage <- function(df, missing_values = c(NA, 99, -9)) {
+  total_values <- sapply(df, function(col) length(col))
+  missing_count <- sapply(df, function(col) sum(col %in% missing_values))
+  missing_percentage <- round((missing_count / total_values) * 100, 2)
+  return(missing_percentage)
+}
+
+missing_percentages <- missing_percentage(sickle_cell_prehct)
+variables_to_remove <- names(missing_percentages)[missing_percentages >= 60]
+sickle_cell_cleaned <- sickle_cell_prehct[, !names(sickle_cell_prehct) %in% variables_to_remove]
+```
+
+```{r}
+# remove samples with unrecorded ACSPSHI
+sickle_cell_cleaned <- sickle_cell_cleaned[sickle_cell_cleaned$ACSPSHI != 99, ]
+
+```
+
+```{r}
+library(missForest)
+
+# Perform imputation (this might take some time for larger datasets)
+col_names<-c("SCREATPR", "SCREAULN", "HB1PR", "INTSCREPR", "AGEGPFF")
+sickle_cell_cleaned[setdiff(names(sickle_cell_cleaned), col_names)] <- lapply(sickle_cell_cleaned[setdiff(names(sickle_cell_cleaned), col_names)], factor)
+
+imputed_data <- missForest(sickle_cell_cleaned)$ximp
+
+sickle_cell_imputed <- imputed_data
+```
+
+# Specific Aim 1 - Propensity Score Matching
+```{r}
+# Load necessary libraries
+library(MatchIt)  # For propensity score matching
+library(foreign)  # For logistic regression
+# Propensity Score Calculation
+# Fit logistic regression model to estimate propensity scores
+ps_model <- glm(ACSPSHI ~ ., data = sickle_cell_imputed, family = binomial(link = "logit"), na.action = na.exclude)
+
+# Extract propensity scores
+sickle_cell_imputed$propensity_score <- predict(ps_model, type = "response", na.action = na.exclude)
+```
+
+```{r}
+# Load necessary libraries
+library(MatchIt)  # For propensity score matching
+library(foreign)  # For logistic regression
+
+# Perform nearest neighbor matching with the updated propensity scores
+matched_data <- matchit(ACSPSHI ~ propensity_score, data = sickle_cell_imputed, method = "nearest", caliper = 0.2)
+
+# Obtain matched dataset
+matched_df <- match.data(matched_data)
+
+# Remove signle-factor variables
+matched_df$SUBDIS1F <- NULL
+matched_df$SCREPRKW <- NULL
+matched_df$HB1PRKW <- NULL
+matched_df$FUNGHXPR <- NULL
+```
+
+## Model 1
+```{r}
+######### Select the best acs_model according to AIC values ########
+# Initialize the minimal model with only the intercept
+minimal_formula <- "ACSPSHI ~ 1"
+minimal_model <- glm(formula(minimal_formula), data = matched_df, family = binomial(link = "logit"))
+current_aic <- AIC(minimal_model)
+best_aic <- current_aic
+
+# List of all potential predictors
+predictors <- names(matched_df)[!names(matched_df) %in% c("ACSPSHI")]
+
+# Initialize the best formula as the minimal formula
+best_formula <- minimal_formula
+
+# Flag to keep track of whether an improvement was made in the last iteration
+improvement <- TRUE
+
+while(improvement) {
+  improvement <- FALSE
+  for(predictor in predictors) {
+    # Attempt to add each predictor to the current best formula and fit a new model
+    trial_formula <- paste(best_formula, predictor, sep = " + ")
+    trial_model <- glm(as.formula(trial_formula), data = matched_df, family = binomial(link = "logit"))
+    trial_aic <- AIC(trial_model)
+    
+    # If the trial model is better (lower AIC), update the best model details
+    if(trial_aic < best_aic) {
+      best_aic <- trial_aic
+      best_formula <- trial_formula
+      improvement <- TRUE
+    }
+  }
+  
+  # Remove the successfully added predictor from the list of predictors
+  if(improvement) {
+    # Extracting variable names from the formula
+    added_variable <- strsplit(best_formula, " \\+ ")[[1]][length(strsplit(best_formula, " \\+ ")[[1]])]
+    predictors <- predictors[!predictors %in% added_variable]
+  }
+}
+
+# Final model after forward selection
+acs_model <- glm(formula(best_formula), data = matched_df, family = binomial(link = "logit"))
+
+# Summary of the best model
+summary(acs_model)
+
+# This gives you the best model based on forward selection
+
+```
+
+## Model 2
+```{r}
+
+######### Select the best acs_model according to propensity score package ########
+
+# Load necessary libraries
+library(MatchIt)  # For propensity score matching
+library(foreign)  # For logistic regression
+library(MASS)     # For stepAIC
+
+# Assuming sickle_cell_imputed is your dataset ready for analysis
+sickle_cell_imputed_nops <- sickle_cell_imputed
+sickle_cell_imputed_nops$propensity_score <- NULL
+# Start with a minimal model, then use stepAIC for forward selection
+# Initially, model only includes the intercept
+initial_model <- glm(ACSPSHI ~ 1, data = sickle_cell_imputed_nops, family = binomial(link = "logit"), na.action = na.exclude)
+
+# Use stepAIC with direction="forward" to add variables one by one based on AIC
+# Note: You need to specify the scope of variables that can be included in the model.
+# Here, as an example, we include all other variables in sickle_cell_imputed as potential predictors.
+forward_selected_model <- stepAIC(initial_model, scope=list(lower=initial_model, upper=glm(ACSPSHI ~ ., data = sickle_cell_imputed_nops, family = binomial)), direction="forward", trace=FALSE)
+
+# Now that we have a model selected via forward selection, extract propensity scores
+sickle_cell_imputed_nops$propensity_score <- predict(forward_selected_model, type="response", na.action=na.exclude)
+
+# Perform nearest neighbor matching with the updated propensity scores
+matched_data_1 <- matchit(ACSPSHI ~ propensity_score, data = sickle_cell_imputed_nops, method = "nearest", caliper = 0.1)
+
+# Obtain matched dataset
+matched_df_1 <- match.data(matched_data_1)
+
+# Statistical Analysis After Matching with the selected model variables
+# Fit logistic regression model to identify predictors of ACSPSHI with the variables selected from forward selection
+acs_model_1 <- glm(formula(forward_selected_model), data = matched_df_1, family = binomial(link = "logit"))
+
+# View model summary to evaluate the model with selected predictors
+summary(acs_model_1)
+
+```
+
+## Model 3
+```{r}
+
+######### Select the first 5 variables to be included in the  acs_model ######### 
+sickle_cell_imputed_5 <- sickle_cell_imputed[, c(1:5,32)]
+# Fit logistic regression model to estimate propensity scores
+ps_model_5 <- glm(ACSPSHI ~ ., data = sickle_cell_imputed_5, family = binomial(link = "logit"), na.action = na.exclude)
+
+# Extract propensity scores
+sickle_cell_imputed_5$propensity_score <- predict(ps_model_5, type = "response", na.action = na.exclude)
+
+# Perform nearest neighbor matching with the updated propensity scores
+matched_data_5 <- matchit(ACSPSHI ~ propensity_score, data = sickle_cell_imputed_5, method = "nearest", caliper = 0.2)
+
+# Obtain matched dataset
+matched_df_5 <- match.data(matched_data_5)
+
+# Final model 
+acs_model_5 <- glm(ACSPSHI~., data = matched_df_5, family = binomial(link = "logit"))
+
+# Summary of the best model
+summary(acs_model_5)
+```
+
