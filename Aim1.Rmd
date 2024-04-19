@@ -66,6 +66,7 @@ sickle_cell_cleaned <- sickle_cell_cleaned[sickle_cell_cleaned$ACSPSHI != 99, ]
 
 ```{r}
 library(missForest)
+set.seed(12315)
 
 # Perform imputation (this might take some time for larger datasets)
 col_names<-c("SCREATPR", "SCREAULN", "HB1PR", "INTSCREPR", "AGEGPFF")
@@ -222,4 +223,94 @@ acs_model_5 <- glm(ACSPSHI~., data = matched_df_5, family = binomial(link = "log
 # Summary of the best model
 summary(acs_model_5)
 ```
+
+# Specific Aim 1 - Filter Methods (Information gain)
+
+```{r}
+library(infotheo)
+
+# Separate features and the target variable
+features <- imputed_data[, setdiff(names(imputed_data), "ACSPSHI")]
+target <- imputed_data$ACSPSHI
+
+# Compute mutual information for each feature
+information_gain <- sapply(features, function(x) mutinformation(discretize(x), discretize(target)))
+
+# Ranking features by their information gain
+ranked_features <- sort(information_gain, decreasing = TRUE)
+
+# Print the ranked features by information gain
+print(ranked_features)
+```
+We can see the information gain suddenly dropped after SNEPHRPR variables, which means that there are not much information gain by adding variables after SNEPHRPR. Thus, we can choose 15 or so variables. This number can be served as a threshold for us to choose later.
+
+# Specific Aim 1 - Wrapper Methods (Recursive Feature Elimination - RFE)
+
+```{r}
+library(caret)
+library(randomForest)
+target <- as.factor(target)
+
+# Define the control using a repeated CV and the random forest model
+control <- rfeControl(functions=rfFuncs, method="cv", number=10)
+
+# Execute RFE with random forest model. 
+results <- rfe(features, target, rfeControl=control, sizes=15)
+
+# View results
+print(results)
+
+selected_features <- predictors(results)
+print(selected_features)
+```
+
+# Specific Aim 1 - Embedded Methods (Lasso Regression)
+
+```{r}
+library(glmnet)
+
+data <- imputed_data
+
+# Change numeric data to numeric ones
+data$SCREATPR <- as.numeric(as.character(data$SCREATPR))
+data$SCREAULN <- as.numeric(as.character(data$SCREAULN))
+data$HB1PR <- as.numeric(as.character(data$HB1PR))
+data$INTSCREPR <- as.numeric(as.character(data$INTSCREPR))
+data$AGEGPFF <- as.numeric(as.character(data$AGEGPFF))
+
+# Create a formula that includes all predictors, excluding the response variable 'ACSPSHI'
+predictor_formula <- as.formula(paste("~", paste(setdiff(names(data), "ACSPSHI"), collapse="+")))
+
+# Create the model matrix - this will automatically generate dummy variables for factor columns
+x <- model.matrix(predictor_formula, data=data)
+y <- as.factor(data$ACSPSHI)
+# Convert factor to numeric 0 and 1
+if(length(levels(y)) == 2) {
+  y <- as.numeric(y) - 1
+}
+
+# Perform cross-validation to find the optimal lambda
+cv_fit <- cv.glmnet(x, y, family="binomial", alpha=1, type.measure="class")  # for classification
+
+# Extract the optimal lambda value
+optimal_lambda <- cv_fit$lambda.min
+
+# Fit the Lasso model using the optimal lambda
+lasso_model <- glmnet(x, y, alpha=1, lambda=optimal_lambda, standardize=TRUE)
+
+# Extract the coefficients at the optimal lambda
+lasso_coefficients <- coef(lasso_model, s=optimal_lambda)
+
+# Identify the non-zero coefficients (selected features)
+non_zero_coeffs <- lasso_coefficients[lasso_coefficients[,1] != 0, ]
+
+# Arrange those features by the coefficients absolute values
+sorted_coeffs <- lasso_coefficients[order(abs(lasso_coefficients[, 1]), decreasing = TRUE), ]
+sorted_coeffs
+```
+
+Combining Filter Methods (Information gain), Wrapper Methods (Recursive Feature Elimination - RFE), and Embedded Methods (Lasso Regression), we could conclude that variables: HCTCIGPF, GVHD_FINAL, CONDGRP_FINAL,CONDGRPF,  SCATXRSN, HB1PR ，SCREAULN， SCREATPR ，YEARGPF， DONORF， ETHNICIT， INTSCREPR ，HLA_FINAL， VOC2YPR， SNEPHRPR are potential important predictors for ACS following HCT among patients with SCD.
+
+![Alt text](/Users/ritay/Desktop/Capstone/bis687-2024/bis687-2024/feature_15.png "Top 15 Important Features")
+
 
