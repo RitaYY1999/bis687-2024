@@ -1,0 +1,72 @@
+library(caret)
+library(xgboost)
+
+# Get dataset
+imputed_data <- imputed_data[, c("HCTCIGPF", "GVHD_FINAL", "CONDGRP_FINAL", "CONDGRPF", "SCATXRSN", 
+                             "HB1PR", "SCREAULN", "SCREATPR", "YEARGPF", "DONORF", "ETHNICIT", 
+                             "INTSCREPR", "HLA_FINAL", "VOC2YPR", "SNEPHRPR", "ACSPSHI")]
+
+# One-hot Encoding variables
+col_names<-c("SCREATPR", "SCREAULN", "HB1PR", "INTSCREPR")
+X <- imputed_data[,1:14]
+columns_to_encode <- setdiff(names(X), col_names)
+data_encoded <- dummyVars("~.", data = X[, columns_to_encode], fullRank = TRUE) %>%
+  predict(newdata = X[, columns_to_encode])
+
+# Combine encoded columns with the numeric columns
+data_combined <- cbind(X[, col_names], data_encoded)
+
+# Start to build Model
+Y <- as.numeric(as.character(imputed_data$ACSPSHI))
+X <- data_combined
+n <- nrow(imputed_data)
+train_indices <- sample(1:n, 0.75 * n)  # 75% for training
+val_indices <- setdiff(1:n, train_indices)  # Remaining 20% for validation
+X_train <- data_combined[train_indices, ]
+Y_train <- Y[train_indices]
+X_val <- data_combined[val_indices, ]
+Y_val <- Y[val_indices]
+
+# Create xgb.DMatrix
+dtrain <-xgb.DMatrix(as.matrix(sapply(X_train, as.numeric)),label=Y_train)
+dtest <- xgb.DMatrix(as.matrix(sapply(X_val, as.numeric)),label=Y_val)
+
+# Train an XGBoost model
+xgb_model <- xgboost(data = dtrain,
+                     nrounds = 100, 
+                     objective = "binary:logistic",
+                     eta = 0.3, 
+                     max_depth = 6)  
+
+# Make predictions on the prediction data
+pred <- predict(xgb_model, as.matrix(X_val))
+predicted_labels <- ifelse(pred > 0.5, 1, 0) 
+
+# Calculate AUC and ROC curve
+roc <- roc(as.numeric(Y_val), as.numeric(pred))
+auc <- auc(roc)
+plot(roc, main = "ROC Curve", col = "blue", lwd = 2)
+
+# Sensitivity Analysis
+conf_matrix <- confusionMatrix(factor(predicted_labels), factor(Y_val))
+print(conf_matrix)
+
+
+# Perform grid search
+# Set up cross-validation
+control <- trainControl(method = "cv", number = 5)
+
+xgb_grid <- expand.grid(
+  nrounds = c(100, 200, 300),  # Example values for number of boosting rounds
+  max_depth = c(3, 6, 9),       # Example values for maximum tree depth
+  eta = c(0.01, 0.1, 0.3),      # Example values for learning rate
+  gamma = c(0, 0.1),       
+  colsample_bytree = c(0.6, 0.8),  
+  min_child_weight = c(1, 3),      
+  subsample = c(0.6, 0.8)          
+)
+# Get best model
+best_model <- xgb_tune$finalModel
+
+# Print best model parameters
+print(best_model)
