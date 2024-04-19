@@ -79,3 +79,168 @@ imputed_data <- missForest(sickle_cell_cleaned)$ximp
 
 sickle_cell_imputed <- imputed_data
 ```
+
+
+### Random Forest
+
+#### 5-fold CV for selecting parameters
+
+```{r}
+library("randomForest")
+library(caret)
+train_control <- trainControl(method = "cv", number = 5)
+
+tuneGrid <- expand.grid(mtry = c(2,4,6,8,10))
+
+# Train the model
+model <- train(ACSPSHI ~ ., 
+               data = imputed_data,
+               method = "rf",
+               trControl = train_control,
+               tuneGrid = tuneGrid,
+               ntree = 100)
+print("Best Parameters:")
+print(model$bestTune)
+```
+
+
+
+Applied 5 fold CV and selected `mtry=2` as the best parameter.
+
+```{r}
+set.seed(123)
+library(randomForest)
+train_index <- sample(1:nrow(imputed_data), round(0.7 * nrow(imputed_data)))
+train_data <- imputed_data[train_index, ]
+rf_model <- randomForest(ACSPSHI ~ ., data = train_data, ntree = 500, classwt = c(1, 780/24), mtry = 2)
+predicted <- predict(rf_model, newdata = test_data)
+accuracy <- mean(predicted == test_data$ACSPSHI)
+print(paste("Accuracy:", accuracy))
+```
+
+
+#### Get the variable importance
+
+```{r}
+vi <- importance(rf_model)
+ordered.vi <- vi[order(-vi), ]
+names(ordered.vi[1:15])
+```
+
+```{r}
+barplot(ordered.vi[1:15], names.arg = names(ordered.vi[1:15]),
+        main = "Variable Importance", ylab = "Mean Decrease in Gini", col = "blue", las = 2)
+```
+
+
+
+
+#### Confusion matrix, sensitivity and specificity
+
+```{r}
+conf_matrix <- confusionMatrix(predicted, test_data$ACSPSHI)
+cat("Sensitivity: ", conf_matrix$byClass["Sensitivity"], "\n")
+cat("Specificity: ", conf_matrix$byClass["Specificity"], "\n")
+
+```
+
+#### ROC plot
+
+```{r}
+library(pROC)
+predicted_probs <- predict(rf_model, newdata = test_data, type = "prob")
+predicted_probs_class1 <- predicted_probs[, 2]
+roc_curve <- roc(test_data$ACSPSHI, predicted_probs_class1)
+plot(roc_curve, col = "blue")
+legend("bottomright", legend = c("ROC Curve"), col = c("blue"), lty = 1:2)
+```
+
+
+#### Refit the RF model with reduced model
+
+```{r}
+set.seed(123)
+library(randomForest)
+train_index <- sample(1:nrow(imputed_data), round(0.7 * nrow(imputed_data)))
+train_data <- imputed_data[train_index, ]
+rf_model <- randomForest(ACSPSHI ~ HCTCIGPF+GVHD_FINAL+CONDGRP_FINAL+CONDGRPF + SCATXRSN+HB1PR+SCREAULN+SCREATPR+YEARGPF+DONORF+ETHNICIT+INTSCREPR+HLA_FINAL+VOC2YPR+SNEPHRPR,
+                         data = train_data, 
+                         ntree = 500, 
+                         classwt = c(1, 780/24), 
+                         mtry = 2)
+predicted <- predict(rf_model.reduced, newdata = test_data)
+accuracy <- mean(predicted == test_data$ACSPSHI)
+print(paste("Accuracy:", accuracy))
+```
+
+```{r}
+conf_matrix <- confusionMatrix(predicted, test_data$ACSPSHI)
+cat("Sensitivity: ", conf_matrix$byClass["Sensitivity"], "\n")
+cat("Specificity: ", conf_matrix$byClass["Specificity"], "\n")
+```
+
+
+```{r}
+predicted_probs <- predict(rf_model.reduced, newdata = test_data, type = "prob")
+predicted_probs_class1 <- predicted_probs[, 2]
+roc_curve <- roc(test_data$ACSPSHI, predicted_probs_class1)
+plot(roc_curve, col = "blue")
+legend("bottomright", legend = c("ROC Curve"), col = c("blue"), lty = 1:2)
+```
+
+
+The ROC curve is better compared to the full model.
+
+
+### Neural Network
+
+#### Model Fitting
+
+```{r}
+set.seed(123)
+library(nnet)
+train_index <- sample(1:nrow(imputed_data), round(0.7 * nrow(imputed_data)))
+train_data <- imputed_data[train_index, ]
+test_data <- imputed_data[-train_index, ]
+nn_model <- nnet(ACSPSHI ~ as.factor(HCTCIGPF)+as.factor(GVHD_FINAL)+as.factor(CONDGRP_FINAL)+as.factor(CONDGRPF) + as.factor(SCATXRSN)+HB1PR+SCREAULN+SCREATPR+as.factor(YEARGPF)+as.factor(DONORF)+as.factor(ETHNICIT)+INTSCREPR+as.factor(HLA_FINAL)+ as.factor(VOC2YPR)+ as.factor(SNEPHRPR),
+                 data = train_data, 
+                 size = 5, 
+                 maxit = 200, 
+                 rang = 0.1, 
+                 decay = 5e-4)
+predicted_nn <- predict(nn_model, newdata = test_data, type = "class")
+accuracy_nn <- mean(predicted_nn == test_data$ACSPSHI)
+print(paste("Accuracy:", accuracy_nn))
+
+```
+
+#### Neural plots
+
+```{r fig.width=10, fig.height=10}
+library(NeuralNetTools)
+plotnet(nn_model, max_sp = T)
+```
+
+There's a hidden layer that highly contributes to predicting the result.
+
+#### Confusion matrix, sensitivity and specificity
+
+```{r}
+conf_matrix <- confusionMatrix(as.factor(as.numeric(predicted_nn)), test_data$ACSPSHI)
+cat("Sensitivity: ", conf_matrix$byClass["Sensitivity"], "\n")
+cat("Specificity: ", conf_matrix$byClass["Specificity"], "\n")
+
+```
+
+#### ROC plot
+
+```{r}
+library(pROC)
+predicted_probs_nn <- predict(nn_model, newdata = test_data, type = "raw")
+roc_curve_nn <- roc(as.factor(as.numeric(predicted_nn)), predicted_probs_nn)
+plot(roc_curve_nn, col = "blue")
+legend("bottomright", legend = c("ROC Curve"), col = c("blue"), lty = 1:2)
+
+```
+
+
